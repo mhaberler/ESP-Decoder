@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.3] - 2026-04-06
+
+### Added
+
+- **Monitor location setting** — users can now choose between opening the ESP Crash Monitor in the bottom panel (default, introduced in v0.11.0) or as an editor tab (legacy behavior). Configure via `esp-decoder.monitorLocation` setting.
+
 ## [0.11.2] - 2026-04-05
 
 ### Added
