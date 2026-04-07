@@ -221,6 +221,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         timestamp: cfg.get<boolean>('serialFilters.timestamp', false),
         suppressPattern: cfg.get<string>('serialFilters.suppressPattern', ''),
         highlightPattern: cfg.get<string>('serialFilters.highlightPattern', ''),
+        dedupPattern: cfg.get<string>('serialFilters.dedupPattern', ''),
+        dedupThreshold: cfg.get<number>('serialFilters.dedupThreshold', 3),
       },
     });
   }
@@ -394,6 +396,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         await cfg.update('serialFilters.timestamp', message.timestamp, vscode.ConfigurationTarget.Global);
         await cfg.update('serialFilters.suppressPattern', message.suppressPattern, vscode.ConfigurationTarget.Global);
         await cfg.update('serialFilters.highlightPattern', message.highlightPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.dedupPattern', message.dedupPattern, vscode.ConfigurationTarget.Global);
+        await cfg.update('serialFilters.dedupThreshold', message.dedupThreshold, vscode.ConfigurationTarget.Global);
         break;
       }
       case 'decodeCrash': {
@@ -941,6 +945,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       border-color: var(--error-fg);
     }
     .filter-toolbar .filter-label { opacity: 0.6; }
+    .dedup-badge {
+      font-size: 10px;
+      opacity: 0.6;
+      margin-left: 5px;
+      background: var(--border);
+      padding: 0 4px;
+      border-radius: 3px;
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
 
     /* Crash Events Panel */
     .crash-list {
@@ -1295,6 +1308,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       </label>
       <input type="text" id="filter-highlight" placeholder="regex…" title="Highlight matches of this regex">
       <div class="filter-sep"></div>
+      <label title="Collapse repeated characters/strings matching this regex after N occurrences">
+        <span class="filter-label">Dedup:</span>
+      </label>
+      <input type="text" id="filter-dedup-pattern" placeholder="regex…" title="Regex for repeated chars to collapse (e.g. \\.)" style="width:80px">
+      <label title="Collapse after this many occurrences">after</label>
+      <input type="text" id="filter-dedup-threshold" placeholder="3" title="Collapse after N occurrences" style="width:36px">
+      <div class="filter-sep"></div>
       <button id="filter-save" class="secondary" title="Save current filter settings to VS Code settings" style="font-size:11px;padding:1px 7px">Save</button>
     </div>
     <div id="serial-output"></div>
@@ -1356,6 +1376,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       highlightPattern: '',
       _suppressRe: null,
       _highlightRe: null,
+      dedupPattern: '',
+      dedupThreshold: 3,
+      _dedupRe: null,
+      // runtime dedup state (per-line, reset on newline)
+      _dedupCount: 0,
+      _dedupBadge: null,   // <span class="dedup-badge"> in current DOM line
     };
 
     function filterSetSuppressPattern(pat) {
@@ -1368,6 +1394,49 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       filterState.highlightPattern = pat;
       try { filterState._highlightRe = pat ? new RegExp(pat, 'g') : null; }
       catch (_) { filterState._highlightRe = null; }
+    }
+
+    function filterSetDedupPattern(pat) {
+      filterState.dedupPattern = pat;
+      try { filterState._dedupRe = pat ? new RegExp(pat, 'g') : null; }
+      catch (_) { filterState._dedupRe = null; }
+    }
+
+    // Reset dedup state when a new line starts.
+    function dedupResetLine() {
+      filterState._dedupCount = 0;
+      filterState._dedupBadge = null;
+    }
+
+    // Apply dedup to a text chunk before rendering. Returns the filtered text.
+    // Matches beyond threshold are dropped; the badge on currentLine is updated.
+    function applyDedupToChunk(chunk) {
+      if (!filterState._dedupRe || filterState.dedupThreshold < 1) { return chunk; }
+      filterState._dedupRe.lastIndex = 0;
+      var threshold = filterState.dedupThreshold;
+      var result = '';
+      var lastIndex = 0;
+      var match;
+      while ((match = filterState._dedupRe.exec(chunk)) !== null) {
+        // Append text before this match unchanged.
+        result += chunk.slice(lastIndex, match.index);
+        filterState._dedupCount++;
+        if (filterState._dedupCount <= threshold) {
+          result += match[0];
+        }
+        // Update or create the badge on the current DOM line.
+        if (filterState._dedupCount > threshold) {
+          if (!filterState._dedupBadge) {
+            filterState._dedupBadge = document.createElement('span');
+            filterState._dedupBadge.className = 'dedup-badge';
+            if (currentLine) { currentLine.appendChild(filterState._dedupBadge); }
+          }
+          filterState._dedupBadge.textContent = String.fromCharCode(215) + filterState._dedupCount;
+        }
+        lastIndex = match.index + match[0].length;
+      }
+      result += chunk.slice(lastIndex);
+      return result;
     }
 
     // Returns the (possibly modified) line string, or null to suppress it.
@@ -1560,12 +1629,25 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         this.value !== '' && filterState._highlightRe === null);
     });
 
+    document.getElementById('filter-dedup-pattern').addEventListener('input', function() {
+      filterSetDedupPattern(this.value);
+      this.classList.toggle('filter-error',
+        this.value !== '' && filterState._dedupRe === null);
+    });
+
+    document.getElementById('filter-dedup-threshold').addEventListener('input', function() {
+      var v = parseInt(this.value, 10);
+      filterState.dedupThreshold = (isNaN(v) || v < 1) ? 3 : v;
+    });
+
     document.getElementById('filter-save').addEventListener('click', () => {
       vscode.postMessage({
         type: 'saveFilters',
         timestamp: filterState.timestamp,
         suppressPattern: filterState.suppressPattern,
         highlightPattern: filterState.highlightPattern,
+        dedupPattern: filterState.dedupPattern,
+        dedupThreshold: filterState.dedupThreshold,
       });
     });
     // ────────────────────────────────────────────────────────────────────────
@@ -1829,6 +1911,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
             }
             currentLineRaw = '';
             carriageReturn = false;
+            dedupResetLine();
             currentLine = document.createElement('div');
             serialOutput.appendChild(currentLine);
           }
@@ -1858,10 +1941,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           serialOutput.replaceChild(newLine, currentLine);
           currentLine = newLine;
           currentLineRaw = '';
+          dedupResetLine();
           carriageReturn = false;
         }
+        var dedupedText = applyDedupToChunk(renderText);
         currentLineRaw += renderText;
-        currentLine.appendChild(renderAnsiText(renderText));
+        if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
       }
 
       var excess = serialOutput.childNodes.length - 10000;
@@ -1932,6 +2017,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       var cbTs = document.getElementById('filter-timestamp');
       var inSuppress = document.getElementById('filter-suppress');
       var inHighlight = document.getElementById('filter-highlight');
+      var inDedupPat = document.getElementById('filter-dedup-pattern');
+      var inDedupThr = document.getElementById('filter-dedup-threshold');
       if (f.timestamp !== undefined) {
         filterState.timestamp = !!f.timestamp;
         cbTs.checked = filterState.timestamp;
@@ -1947,6 +2034,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         filterSetHighlightPattern(f.highlightPattern);
         inHighlight.classList.toggle('filter-error',
           f.highlightPattern !== '' && filterState._highlightRe === null);
+      }
+      if (f.dedupPattern !== undefined) {
+        inDedupPat.value = f.dedupPattern;
+        filterSetDedupPattern(f.dedupPattern);
+        inDedupPat.classList.toggle('filter-error',
+          f.dedupPattern !== '' && filterState._dedupRe === null);
+      }
+      if (f.dedupThreshold !== undefined) {
+        filterState.dedupThreshold = f.dedupThreshold || 3;
+        inDedupThr.value = filterState.dedupThreshold;
       }
     }
 

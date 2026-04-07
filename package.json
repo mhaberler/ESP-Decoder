@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 crash dumps from serial port — powered by TraceBreaker (trbr).",
-  "version": "0.11.4",
+  "version": "0.20.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -172,6 +172,16 @@
           "type": "string",
           "default": "",
           "description": "Regex pattern — matches are highlighted (inverse colours) in the serial monitor"
+        },
+        "esp-decoder.serialFilters.dedupPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern for repeated characters/strings to collapse in the serial monitor (e.g. \\\\. for dots). Matches beyond the threshold are hidden and counted."
+        },
+        "esp-decoder.serialFilters.dedupThreshold": {
+          "type": "number",
+          "default": 3,
+          "description": "Number of regex matches to show before collapsing repeated characters (dedupPattern)"
         }
       }
     }
