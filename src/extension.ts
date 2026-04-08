@@ -402,7 +402,8 @@ function subscribeToPioarduinoEvents(
 
         // Port-aware: only release when the upload targets the same port
         // (or "Auto"/undefined which could resolve to any port).
-        if (port && serial.selectedPath && port !== serial.selectedPath) {
+        // On macOS /dev/cu.* and /dev/tty.* refer to the same physical port.
+        if (port && serial.selectedPath && !isSameSerialPort(port, serial.selectedPath)) {
           log.appendLine(
             `[ESP Decoder] onWillUpload: upload port (${port}) differs from monitored port (${serial.selectedPath}) — keeping connection`,
           );
@@ -455,6 +456,22 @@ async function reacquireWithRetry(
     }
   }
   log.appendLine('[ESP Decoder] Failed to reacquire serial port after all attempts');
+}
+
+/**
+ * Compare two serial port paths accounting for macOS where /dev/cu.* and
+ * /dev/tty.* refer to the same physical device.
+ */
+function isSameSerialPort(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+  return normalizePortPath(a) === normalizePortPath(b);
+}
+
+function normalizePortPath(p: string): string {
+  // macOS: /dev/cu.usbmodemXXX ↔ /dev/tty.usbmodemXXX
+  return p.replace(/^\/dev\/cu\./, '/dev/tty.');
 }
 
 function isEspIdfBuildElf(elfPath: string): boolean {
