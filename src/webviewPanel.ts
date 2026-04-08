@@ -1160,6 +1160,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
 
     /* ANSI colour support for serial output */
     .ansi-bold { font-weight: bold; }
+    .ansi-dim { opacity: 0.5; }
     .ansi-italic { font-style: italic; }
     .ansi-underline { text-decoration: underline; }
     .ansi-strikethrough { text-decoration: line-through; }
@@ -1167,6 +1168,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     .ansi-blink { animation: ansi-blink 1s step-end infinite; }
     .ansi-blink-fast { animation: ansi-blink 0.5s step-end infinite; }
     .ansi-hidden { visibility: hidden; }
+    .ansi-reverse { filter: invert(1); }
     @keyframes ansi-blink { 50% { opacity: 0; } }
     .ansi-fg-black   { color: rgb(128,128,128); }
     .ansi-fg-red     { color: rgb(255,  0,  0); }
@@ -1382,6 +1384,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       // runtime dedup state (per-line, reset on newline)
       _dedupCount: 0,
       _dedupBadge: null,   // <span class="dedup-badge"> in current DOM line
+      _lineStarted: false, // whether timestamp has been prepended for this line
     };
 
     function filterSetSuppressPattern(pat) {
@@ -1406,6 +1409,33 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     function dedupResetLine() {
       filterState._dedupCount = 0;
       filterState._dedupBadge = null;
+      filterState._lineStarted = false;
+    }
+
+    // Apply per-chunk filters (highlight, dedup). Timestamp is prepended once
+    // on the first non-empty chunk of each line.
+    function applyChunkFilters(chunk) {
+      if (chunk === '') { return chunk; }
+      var out = chunk;
+      // Prepend timestamp once at the start of the line.
+      if (filterState.timestamp && !filterState._lineStarted) {
+        var now = new Date();
+        var ts = now.toISOString().slice(11, 23);
+        out = ESC + '[2m[' + ts + ']' + ESC + '[0m ' + out;
+        filterState._lineStarted = true;
+      } else if (out !== '') {
+        filterState._lineStarted = true;
+      }
+      // Apply highlight.
+      if (filterState._highlightRe) {
+        filterState._highlightRe.lastIndex = 0;
+        out = out.replace(filterState._highlightRe, function(m) {
+          return ESC + '[7m' + m + ESC + '[27m';
+        });
+      }
+      // Apply dedup.
+      out = applyDedupToChunk(out);
+      return out;
     }
 
     // Apply dedup to a text chunk before rendering. Returns the filtered text.
@@ -1439,22 +1469,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       return result;
     }
 
-    // Returns the (possibly modified) line string, or null to suppress it.
     var ESC = String.fromCharCode(27);
 
+    // Returns null if the line should be suppressed, otherwise the raw line unchanged.
+    // Timestamp and highlight are applied per-chunk in applyChunkFilters instead.
     function applyLineFilters(line) {
       if (filterState._suppressRe && filterState._suppressRe.test(line)) { return null; }
-      if (filterState.timestamp) {
-        var now = new Date();
-        var ts = now.toISOString().slice(11, 23); // HH:MM:SS.mmm
-        line = ESC + '[2m[' + ts + ']' + ESC + '[0m ' + line;
-      }
-      if (filterState._highlightRe) {
-        filterState._highlightRe.lastIndex = 0;
-        line = line.replace(filterState._highlightRe, function(m) {
-          return ESC + '[7m' + m + ESC + '[27m';
-        });
-      }
       return line;
     }
     // ────────────────────────────────────────────────────────────────────────
@@ -1462,7 +1482,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // ANSI colour state for the serial terminal
     const ansiState = {
       bold: false, italic: false, underline: false, strikethrough: false,
-      blink: false, fastBlink: false, hidden: false,
+      blink: false, fastBlink: false, hidden: false, dim: false, reverse: false,
       fg: null, bg: null,
     };
     // Holds a trailing incomplete CSI sequence from the previous data chunk
@@ -1478,23 +1498,27 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     function resetAnsiState() {
       ansiState.bold=false; ansiState.italic=false; ansiState.underline=false;
       ansiState.strikethrough=false; ansiState.blink=false; ansiState.fastBlink=false;
-      ansiState.hidden=false; ansiState.fg=null; ansiState.bg=null;
+      ansiState.hidden=false; ansiState.dim=false; ansiState.reverse=false;
+      ansiState.fg=null; ansiState.bg=null;
     }
 
     function ansiApplyCode(code) {
       switch (code) {
         case  0: resetAnsiState(); break;
         case  1: ansiState.bold=true; break;
+        case  2: ansiState.dim=true; break;
         case  3: ansiState.italic=true; break;
         case  4: ansiState.underline=true; break;
         case  5: ansiState.blink=true; ansiState.fastBlink=false; break;
         case  6: ansiState.fastBlink=true; ansiState.blink=false; break;
+        case  7: ansiState.reverse=true; break;
         case  8: ansiState.hidden=true; break;
         case  9: ansiState.strikethrough=true; break;
-        case 22: ansiState.bold=false; break;
+        case 22: ansiState.bold=false; ansiState.dim=false; break;
         case 23: ansiState.italic=false; break;
         case 24: ansiState.underline=false; break;
         case 25: ansiState.blink=false; ansiState.fastBlink=false; break;
+        case 27: ansiState.reverse=false; break;
         case 28: ansiState.hidden=false; break;
         case 29: ansiState.strikethrough=false; break;
         case 30: ansiState.fg='black';   break;
@@ -1522,16 +1546,19 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       if (text === '') return null;
       const needsSpan = ansiState.bold || ansiState.italic || ansiState.underline ||
                         ansiState.strikethrough || ansiState.blink || ansiState.fastBlink ||
-                        ansiState.hidden || ansiState.fg || ansiState.bg;
+                        ansiState.hidden || ansiState.dim || ansiState.reverse ||
+                        ansiState.fg || ansiState.bg;
       if (!needsSpan) return document.createTextNode(text);
       const s = document.createElement('span');
       if (ansiState.bold)          s.classList.add('ansi-bold');
+      if (ansiState.dim)           s.classList.add('ansi-dim');
       if (ansiState.italic)        s.classList.add('ansi-italic');
       if (ansiState.underline)     s.classList.add('ansi-underline');
       if (ansiState.strikethrough) s.classList.add('ansi-strikethrough');
       if (ansiState.blink)         s.classList.add('ansi-blink');
       if (ansiState.fastBlink)     s.classList.add('ansi-blink-fast');
       if (ansiState.hidden)        s.classList.add('ansi-hidden');
+      if (ansiState.reverse)       s.classList.add('ansi-reverse');
       if (ansiState.fg)            s.classList.add('ansi-fg-' + ansiState.fg);
       if (ansiState.bg)            s.classList.add('ansi-bg-' + ansiState.bg);
       s.appendChild(document.createTextNode(text));
@@ -1604,6 +1631,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       carriageReturn = false;
       currentLine = null;
       currentLineRaw = '';
+      dedupResetLine();
       crashList.innerHTML = '';
       crashCount = 0;
       crashCountBadge.style.display = 'none';
@@ -1899,16 +1927,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           if (part === CR) {
             carriageReturn = true;
           } else {
-            // LF or CRLF — commit the completed line through the filter pipeline.
+            // LF or CRLF — run suppress filter; timestamp/highlight are already
+            // applied per-chunk during rendering so the DOM is up to date.
             var filtered = applyLineFilters(currentLineRaw);
             if (filtered === null) {
+              // Suppress filter matched — remove the line from DOM.
               if (currentLine && currentLine.parentNode === serialOutput) {
                 serialOutput.removeChild(currentLine);
               }
-            } else if (filtered !== currentLineRaw) {
-              currentLine.textContent = '';
-              currentLine.appendChild(renderAnsiText(filtered));
             }
+            // Otherwise leave currentLine DOM intact (dedup badge preserved).
             currentLineRaw = '';
             carriageReturn = false;
             dedupResetLine();
@@ -1944,7 +1972,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           dedupResetLine();
           carriageReturn = false;
         }
-        var dedupedText = applyDedupToChunk(renderText);
+        var dedupedText = applyChunkFilters(renderText);
         currentLineRaw += renderText;
         if (dedupedText) { currentLine.appendChild(renderAnsiText(dedupedText)); }
       }

@@ -179,7 +179,8 @@
           "description": "Regex pattern for repeated characters/strings to collapse in the serial monitor (e.g. \\\\. for dots). Matches beyond the threshold are hidden and counted."
         },
         "esp-decoder.serialFilters.dedupThreshold": {
-          "type": "number",
+          "type": "integer",
+          "minimum": 1,
           "default": 3,
           "description": "Number of regex matches to show before collapsing repeated characters (dedupPattern)"
         }
