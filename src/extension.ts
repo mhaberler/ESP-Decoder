@@ -6,6 +6,15 @@ import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
 import { findPioEnvironments, selectElfFile } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
+/** Shape of the public API exported by the pioarduino IDE extension. */
+interface PioarduinoApi {
+  onWillUpload: vscode.Event<{
+    port: string | undefined;
+    waitUntil(promise: Promise<void>): void;
+  }>;
+  onDidUpload: vscode.Event<{ port: string | undefined; exitCode: number }>;
+}
+
 let serialManager: SerialPortManager;
 let viewProvider: EspDecoderWebviewPanel | undefined;
 let outputChannel: vscode.OutputChannel;
@@ -29,6 +38,10 @@ export function activate(context: vscode.ExtensionContext) {
     return;
   }
   context.subscriptions.push(serialManager);
+
+  // Subscribe to pioarduino upload lifecycle events so we automatically
+  // release the serial port before flashing and reacquire it afterwards.
+  subscribeToPioarduinoEvents(context, serialManager, outputChannel);
 
   // Status bar item - opens ESP Connect window
   const statusBarConnection = vscode.window.createStatusBarItem(
@@ -358,6 +371,121 @@ function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string
     }
     currentDir = parentDir;
   }
+}
+
+/**
+ * Subscribe to pioarduino IDE upload lifecycle events.
+ *
+ * When pioarduino starts an upload (flash) we release the serial port so the
+ * upload tool can access it.  Once the upload finishes we reconnect
+ * automatically so monitoring can continue without user interaction.
+ *
+ * Optimisations over a naive approach:
+ *  - waitUntil() barrier: pioarduino blocks the upload until we confirm the
+ *    port has been released — no race condition.
+ *  - Port-aware: we only release if ESP-Decoder is connected to the same port
+ *    (or when pioarduino uses "Auto" which could resolve to any port).
+ *  - Retry-based reacquire: instead of a fixed delay we try to reconnect
+ *    immediately and retry with short back-off if the OS hasn't released the
+ *    device yet.
+ */
+function subscribeToPioarduinoEvents(
+  context: vscode.ExtensionContext,
+  serial: SerialPortManager,
+  log: vscode.OutputChannel,
+): void {
+  const pioExt = vscode.extensions.getExtension<PioarduinoApi>('pioarduino.pioarduino-ide');
+  if (!pioExt) {
+    log.appendLine('[ESP Decoder] pioarduino IDE extension not found — upload events unavailable');
+    return;
+  }
+
+  const activate = pioExt.isActive
+    ? Promise.resolve(pioExt.exports)
+    : pioExt.activate();
+
+  Promise.resolve(activate).then((api) => {
+    if (!api?.onWillUpload || !api?.onDidUpload) {
+      log.appendLine('[ESP Decoder] pioarduino IDE API does not expose upload events');
+      return;
+    }
+
+    log.appendLine('[ESP Decoder] Subscribed to pioarduino upload lifecycle events');
+
+    context.subscriptions.push(
+      api.onWillUpload((event) => {
+        const { port, waitUntil } = event;
+
+        // Port-aware: only release when the upload targets the same port
+        // (or "Auto"/undefined which could resolve to any port).
+        // On macOS /dev/cu.* and /dev/tty.* refer to the same physical port.
+        if (port && serial.selectedPath && !isSameSerialPort(port, serial.selectedPath)) {
+          log.appendLine(
+            `[ESP Decoder] onWillUpload: upload port (${port}) differs from monitored port (${serial.selectedPath}) — keeping connection`,
+          );
+          return;
+        }
+
+        log.appendLine(
+          `[ESP Decoder] onWillUpload (port=${port ?? 'auto'}) — releasing serial port`,
+        );
+
+        // Tell pioarduino to wait until we have fully released the port.
+        waitUntil(serial.releasePort());
+      }),
+    );
+
+    context.subscriptions.push(
+      api.onDidUpload(async ({ port, exitCode }) => {
+        log.appendLine(
+          `[ESP Decoder] onDidUpload (port=${port ?? 'auto'}, exitCode=${exitCode}) — reacquiring serial port`,
+        );
+        await reacquireWithRetry(serial, log);
+      }),
+    );
+  }).catch((err) => {
+    log.appendLine(`[ESP Decoder] Failed to subscribe to pioarduino events: ${err}`);
+  });
+}
+
+/**
+ * Try to reconnect to the serial port with a short back-off.
+ * The OS may still hold the USB device for a moment after the upload tool exits.
+ */
+async function reacquireWithRetry(
+  serial: SerialPortManager,
+  log: vscode.OutputChannel,
+  maxAttempts = 5,
+  baseDelayMs = 300,
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await serial.reacquirePort();
+      log.appendLine(`[ESP Decoder] Serial port reacquired (attempt ${attempt})`);
+      return;
+    } catch (err) {
+      const delay = baseDelayMs * attempt;
+      log.appendLine(
+        `[ESP Decoder] Reacquire attempt ${attempt}/${maxAttempts} failed — retrying in ${delay}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  log.appendLine('[ESP Decoder] Failed to reacquire serial port after all attempts');
+}
+
+/**
+ * Compare two serial port paths accounting for macOS where /dev/cu.* and
+ * /dev/tty.* refer to the same physical device.
+ */
+function isSameSerialPort(a: string, b: string): boolean {
+  return normalizePortPath(a) === normalizePortPath(b);
+}
+
+function normalizePortPath(p: string): string {
+  // macOS: /dev/cu.usbmodemXXX ↔ /dev/tty.usbmodemXXX
+  // Lowercase for case-insensitive comparison (e.g. COM3 vs com3 on Windows).
+  return p.replace(/^\/dev\/cu\./, '/dev/tty.').toLowerCase();
 }
 
 function isEspIdfBuildElf(elfPath: string): boolean {
