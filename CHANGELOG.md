@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.0] - 2026-04-09
+
+### Added
+
+- **Automatic serial port handoff with pioarduino IDE** — ESP Decoder now subscribes to the `onWillUpload` / `onDidUpload` events exported by the pioarduino IDE extension. When pioarduino starts a flash operation, ESP Decoder automatically releases the serial port so the upload tool can access it, then reconnects immediately afterwards without any user interaction.
+  - Port release uses a `waitUntil()` barrier: pioarduino blocks the upload until ESP Decoder confirms the port is fully closed — no race conditions.
+  - Port-aware release: only releases the connection when the upload targets the same physical device (handles macOS `/dev/cu.*` ↔ `/dev/tty.*` aliases and Windows case-insensitive COM port names).
+  - Retry-based reacquire: reconnects immediately after upload completion with exponential back-off (up to 5 attempts) instead of a fixed delay.
+  - Serial port close errors now propagate correctly so a failed release aborts the upload rather than proceeding with the port still open.
+
 ## [0.11.3] - 2026-04-06
 
 ### Added
