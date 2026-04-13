@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import { SerialPortManager } from './serialPortManager';
@@ -36,6 +38,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private serialFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly SERIAL_FLUSH_INTERVAL_MS = 50;
   private readonly utf8Decoder = new StringDecoder('utf8');
+
+  // Log2File state
+  private logStream: import('fs').WriteStream | null = null;
+  private logFilePath: string | null = null;
+  private logFiltered = false;
+  private logFilterConfig: { timestamp: boolean; suppressRe: RegExp | null; dedupRe: RegExp | null; dedupThreshold: number } | null = null;
+  private logLineBuffer = '';
+  private logDedupCount = 0;
 
   constructor(
     extensionUri: vscode.Uri,
@@ -245,6 +255,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // Use StringDecoder to correctly handle multi-byte UTF-8 characters
     // (e.g. ▂▄▆█) that may be split across consecutive data chunks.
     const text = this.utf8Decoder.write(data);
+
+    // Write to log file if logging is active
+    if (this.logStream) {
+      if (this.logFiltered && this.logFilterConfig) {
+        this.writeFilteredLog(text);
+      } else {
+        this.logStream.write(text);
+      }
+    }
 
     // Buffer outgoing display data and flush in batches.  Posting every raw
     // chunk as a separate IPC message can produce thousands of messages per
@@ -474,6 +493,153 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         await this.handleDecodeCoredumpFile();
         break;
       }
+      case 'startLog': {
+        await this.startLogToFile(
+          typeof message.filename === 'string' ? message.filename : '',
+          !!message.filtered,
+          message.filters,
+        );
+        break;
+      }
+      case 'stopLog': {
+        this.stopLogToFile();
+        break;
+      }
+    }
+  }
+
+  /**
+   * Start logging serial data to a file.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async startLogToFile(customFilename: string, filtered?: boolean, filters?: any): Promise<void> {
+    if (this.logStream) {
+      this.stopLogToFile();
+    }
+
+    // Set up filtered logging
+    this.logFiltered = !!filtered;
+    this.logLineBuffer = '';
+    this.logDedupCount = 0;
+    if (filtered && filters) {
+      let suppressRe: RegExp | null = null;
+      let dedupRe: RegExp | null = null;
+      try { suppressRe = filters.suppressPattern ? new RegExp(filters.suppressPattern) : null; } catch { /* invalid regex ignored */ }
+      try { dedupRe = filters.dedupPattern ? new RegExp(filters.dedupPattern, 'g') : null; } catch { /* invalid regex ignored */ }
+      this.logFilterConfig = {
+        timestamp: !!filters.timestamp,
+        suppressRe,
+        dedupRe,
+        dedupThreshold: (typeof filters.dedupThreshold === 'number' && filters.dedupThreshold >= 1) ? filters.dedupThreshold : 3,
+      };
+    } else {
+      this.logFilterConfig = null;
+    }
+
+    // Determine target directory: workspace folder or home
+    const folders = vscode.workspace.workspaceFolders;
+    const logDir = folders && folders.length > 0
+      ? folders[0].uri.fsPath
+      : require('os').homedir();
+
+    // Build filename: use custom name or generate default "Log_HH-MM-SS_DD-MM-YYYY.txt"
+    let filename: string;
+    if (customFilename) {
+      // Sanitise to prevent path traversal
+      filename = path.basename(customFilename);
+    } else {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const timeStr = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+      const dateStr = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}`;
+      filename = `Log_${timeStr}_${dateStr}.txt`;
+    }
+
+    this.logFilePath = path.join(logDir, filename);
+    this.logStream = fs.createWriteStream(this.logFilePath, { flags: 'a', encoding: 'utf8' });
+    this.log.appendLine(`[ESP Decoder] Log2File started: ${this.logFilePath}`);
+    vscode.window.showInformationMessage(`Logging to ${this.logFilePath}`);
+  }
+
+  /**
+   * Stop logging serial data to file.
+   */
+  /**
+   * Write serial text through server-side filters before writing to log file.
+   * Processes text line-by-line: applies suppress, timestamp, and dedup.
+   */
+  private writeFilteredLog(text: string): void {
+    if (!this.logStream || !this.logFilterConfig) { return; }
+    const cfg = this.logFilterConfig;
+
+    this.logLineBuffer += text;
+    const parts = this.logLineBuffer.split(/\r?\n/);
+    // Keep the last (possibly incomplete) segment in the buffer
+    this.logLineBuffer = parts.pop() || '';
+
+    for (const rawLine of parts) {
+      // Suppress filter
+      if (cfg.suppressRe && cfg.suppressRe.test(rawLine)) {
+        this.logDedupCount = 0;
+        continue;
+      }
+
+      let line = rawLine;
+
+      // Dedup filter
+      if (cfg.dedupRe) {
+        cfg.dedupRe.lastIndex = 0;
+        let result = '';
+        let lastIdx = 0;
+        let m: RegExpExecArray | null;
+        let lineDedup = 0;
+        while ((m = cfg.dedupRe.exec(line)) !== null) {
+          result += line.slice(lastIdx, m.index);
+          this.logDedupCount++;
+          lineDedup++;
+          if (this.logDedupCount <= cfg.dedupThreshold) {
+            result += m[0];
+          }
+          lastIdx = m.index + m[0].length;
+        }
+        result += line.slice(lastIdx);
+        if (this.logDedupCount > cfg.dedupThreshold && lineDedup > 0) {
+          result += ` [x${this.logDedupCount}]`;
+        }
+        line = result;
+      }
+
+      // Reset dedup count per line (matching webview behavior)
+      this.logDedupCount = 0;
+
+      // Timestamp filter
+      if (cfg.timestamp) {
+        const now = new Date();
+        const ts = now.toISOString().slice(11, 23);
+        line = `[${ts}] ${line}`;
+      }
+
+      this.logStream.write(line + '\n');
+    }
+  }
+
+  private stopLogToFile(): void {
+    if (this.logStream) {
+      // Flush remaining line buffer
+      if (this.logFiltered && this.logLineBuffer) {
+        this.logStream.write(this.logLineBuffer + '\n');
+        this.logLineBuffer = '';
+      }
+      this.logStream.end();
+      this.logStream = null;
+      this.logFiltered = false;
+      this.logFilterConfig = null;
+      this.logDedupCount = 0;
+      this.log.appendLine(`[ESP Decoder] Log2File stopped: ${this.logFilePath}`);
+      if (this.logFilePath) {
+        vscode.window.showInformationMessage(`Log saved: ${this.logFilePath}`);
+      }
+      this.logFilePath = null;
     }
   }
 
@@ -664,6 +830,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.stopLogToFile();
     this.cancelSerialFlush();
     this.crashCapturer.dispose();
     this.addr2linePool.disposeAll();
@@ -945,6 +1112,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       border-color: var(--error-fg);
     }
     .filter-toolbar .filter-label { opacity: 0.6; }
+    .filter-toolbar button.log-active {
+      background: var(--success-fg);
+      color: #000;
+    }
+    .filter-toolbar button.log-active:hover {
+      opacity: 0.85;
+    }
     .dedup-badge {
       font-size: 10px;
       opacity: 0.6;
@@ -1318,6 +1492,12 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       <input type="text" id="filter-dedup-threshold" placeholder="3" title="Collapse after N occurrences" style="width:36px">
       <div class="filter-sep"></div>
       <button id="filter-save" class="secondary" title="Save current filter settings to VS Code settings" style="font-size:11px;padding:1px 7px">Save</button>
+      <div class="filter-sep"></div>
+      <label title="Apply Suppress, Timestamp and Dedup filters to the log file">
+        <input type="checkbox" id="filter-log-filtered"> Filtered
+      </label>
+      <button id="filter-log2file" class="secondary" title="Start/stop logging serial output to a file" style="font-size:11px;padding:1px 7px">Log2File</button>
+      <input type="text" id="filter-log-filename" placeholder="Log_HH-MM-SS_DD-MM-YYYY.txt" title="Override default log filename" style="width:200px">
     </div>
     <div id="serial-output"></div>
     <button id="btn-scroll-bottom" title="Scroll to bottom">&#8595; Scroll to bottom</button>
@@ -1677,6 +1857,37 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         dedupPattern: filterState.dedupPattern,
         dedupThreshold: filterState.dedupThreshold,
       });
+    });
+
+    // ── Log2File ──────────────────────────────────────────────────────────
+    var logActive = false;
+    var btnLog = document.getElementById('filter-log2file');
+    var logFilenameInput = document.getElementById('filter-log-filename');
+    var logFilteredCheckbox = document.getElementById('filter-log-filtered');
+
+    btnLog.addEventListener('click', function() {
+      if (logActive) {
+        vscode.postMessage({ type: 'stopLog' });
+        logActive = false;
+        btnLog.classList.remove('log-active');
+        btnLog.textContent = 'Log2File';
+      } else {
+        var customName = logFilenameInput.value.trim();
+        var useFilters = logFilteredCheckbox.checked;
+        var msg = { type: 'startLog', filename: customName || '', filtered: useFilters };
+        if (useFilters) {
+          msg.filters = {
+            timestamp: filterState.timestamp,
+            suppressPattern: filterState.suppressPattern,
+            dedupPattern: filterState.dedupPattern,
+            dedupThreshold: filterState.dedupThreshold,
+          };
+        }
+        vscode.postMessage(msg);
+        logActive = true;
+        btnLog.classList.add('log-active');
+        btnLog.textContent = 'Stop Log';
+      }
     });
     // ────────────────────────────────────────────────────────────────────────
 
