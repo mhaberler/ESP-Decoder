@@ -65,7 +65,7 @@ The input field turns red if the regex is invalid.
 | `ERROR` | Highlight every occurrence of the word ERROR |
 | `0x[0-9a-fA-F]+` | Highlight hex addresses |
 | `\d+\.\d+\.\d+\.\d+` | Highlight IP addresses |
-| `(?i)assert` | Highlight assert (case-insensitive) |
+| `(?i:assert)` | Highlight assert (case-insensitive) |
 
 ---
 
