@@ -463,7 +463,7 @@ async function reacquireWithRetry(
       await serial.reacquirePort();
       log.appendLine(`[ESP Decoder] Serial port reacquired (attempt ${attempt})`);
       return;
-    } catch (err) {
+    } catch {
       if (attempt === maxAttempts) {
         break;
       }

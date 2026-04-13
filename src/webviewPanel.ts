@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
@@ -540,7 +541,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     const folders = vscode.workspace.workspaceFolders;
     const logDir = folders && folders.length > 0
       ? folders[0].uri.fsPath
-      : require('os').homedir();
+      : os.homedir();
 
     // Build filename: use custom name or generate default "Log_HH-MM-SS_DD-MM-YYYY.txt"
     let filename: string;
