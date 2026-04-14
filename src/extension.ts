@@ -219,7 +219,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (syncDebounceTimer !== null) { clearTimeout(syncDebounceTimer); }
         syncDebounceTimer = setTimeout(() => {
           syncDebounceTimer = null;
-          viewProvider!.syncState();
+          viewProvider?.syncState();
         }, 50);
       }
     })
