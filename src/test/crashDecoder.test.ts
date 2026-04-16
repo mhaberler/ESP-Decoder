@@ -7,9 +7,10 @@
  *   firmware.elf        – the matching firmware ELF with debug symbols
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,10 @@ const CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp32c6_assert.txt');
 
 const CRASH_TEXT = fs.readFileSync(CRASH_TEXT_PATH, 'utf8');
 
+// ESP8266 crash fixture
+const ESP8266_CRASH_TEXT_PATH = path.join(FIXTURES_DIR, 'esp8266_crash.txt');
+const ESP8266_CRASH_TEXT = fs.readFileSync(ESP8266_CRASH_TEXT_PATH, 'utf8');
+
 // ESP32 coredump b64 test fixtures
 // Source: https://github.com/espressif/esp-coredump/tree/master/tests/esp32
 const B64_COREDUMP_PATH = path.join(FIXTURES_DIR, 'coredump_esp32.b64');
@@ -83,6 +88,7 @@ function findPioGdb(kind: 'riscv' | 'xtensa'): string | undefined {
     { pkg: 'toolchain-xtensa-esp32s3-elf', bin: `xtensa-esp32s3-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32-elf', bin: `xtensa-esp32-elf-gdb${ext}` },
     { pkg: 'toolchain-xtensa-esp32s2-elf', bin: `xtensa-esp32s2-elf-gdb${ext}` },
+    { pkg: 'toolchain-xtensa', bin: `xtensa-lx106-elf-gdb${ext}` },
   ];
   for (const { pkg, bin } of xtensaVariants) {
     const c = path.join(pioDir, pkg, 'bin', bin);
@@ -309,6 +315,256 @@ describe('decodeCrash – ESP32-C6 with real ELF', () => {
     // MEPC = 0x4080c1aa
     const mepc = decoded.regs?.['MEPC'] ?? decoded.regs?.['mepc'];
     expect(mepc).toBe(0x4080c1aa);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ESP8266 crash detection
+// ---------------------------------------------------------------------------
+
+describe('TrbrCrashCapturer – ESP8266 exception crash', () => {
+  let capturer: TrbrCrashCapturer;
+
+  beforeEach(() => {
+    capturer = new TrbrCrashCapturer();
+  });
+
+  it('detects the crash', () => {
+    const event = feedCrashText(capturer, ESP8266_CRASH_TEXT);
+    expect(event).toBeDefined();
+  });
+
+  it('classifies the crash as xtensa', () => {
+    const event = feedCrashText(capturer, ESP8266_CRASH_TEXT);
+    expect(event?.kind).toBe('xtensa');
+  });
+
+  it('includes the exception number in the raw text', () => {
+    const event = feedCrashText(capturer, ESP8266_CRASH_TEXT);
+    expect(event?.rawText).toContain('Exception (28)');
+  });
+
+  it('includes epc1 and excvaddr registers', () => {
+    const event = feedCrashText(capturer, ESP8266_CRASH_TEXT);
+    expect(event?.rawText).toContain('epc1=0x4020e41c');
+    expect(event?.rawText).toContain('excvaddr=0x00000000');
+  });
+
+  it('includes the stack dump', () => {
+    const event = feedCrashText(capturer, ESP8266_CRASH_TEXT);
+    expect(event?.rawText).toContain('>>>stack>>>');
+    expect(event?.rawText).toContain('<<<stack<<<');
+  });
+
+  it('is not captured without flush (no Rebooting... terminator)', () => {
+    // ESP8266 fixture has no "Rebooting..." line, so the crash block is only
+    // finalized via flush(). Pushing data alone must NOT emit an event.
+    let detected: CrashEvent | undefined;
+    capturer.onCrashDetected((e) => { if (!detected) { detected = e; } });
+    capturer.pushData(Buffer.from(ESP8266_CRASH_TEXT, 'utf8'));
+    // No flush — block must remain pending
+    expect(detected).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: ESP32 Guru Meditation captured via trbr native path
+// ---------------------------------------------------------------------------
+
+describe('TrbrCrashCapturer – ESP32 Guru Meditation (trbr native path)', () => {
+  let capturer: TrbrCrashCapturer;
+
+  beforeEach(() => {
+    capturer = new TrbrCrashCapturer();
+  });
+
+  const GURU_CRASH = [
+    'Guru Meditation Error: Core  0 panic\'ed (LoadProhibited). Exception was unhandled.',
+    'Core  0 register dump:',
+    'PC      : 0x400d1234  PS      : 0x00060030  A0      : 0x800d5678  A1      : 0x3ffb1234',
+    'EXCVADDR: 0x00000000  EXCCAUSE: 0x0000001c',
+    'Backtrace: 0x400d1234:0x3ffb1234 0x400d5678:0x3ffb5678',
+    '',
+    'Rebooting...',
+  ].join('\n');
+
+  it('detects the crash via trbr (not fallback)', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event).toBeDefined();
+    // trbr-native events have numeric IDs (e.g. "000001"), not "fallback-..." prefixed
+    expect(event!.id).not.toMatch(/^fallback-/);
+  });
+
+  it('classifies the crash as xtensa', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event?.kind).toBe('xtensa');
+  });
+
+  it('includes backtrace and registers in the raw text', () => {
+    const event = feedCrashText(capturer, GURU_CRASH);
+    expect(event?.rawText).toContain('Backtrace:');
+    expect(event?.rawText).toContain('EXCVADDR');
+    expect(event?.rawText).toContain('EXCCAUSE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ESP8266 crash decoding (raw decode fallback)
+// ---------------------------------------------------------------------------
+
+describe('decodeCrash – ESP8266 raw decode', () => {
+  function makeEsp8266CrashEvent(): CrashEvent {
+    const lines = ESP8266_CRASH_TEXT.split('\n').filter((l) => l.trim().length > 0);
+    return {
+      id: 'test-esp8266-001',
+      kind: 'xtensa',
+      lines,
+      rawText: ESP8266_CRASH_TEXT,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('extracts Exception 28 as LoadProhibited fault message', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    expect(decoded.toolsMissing).toBe(true);
+    expect(decoded.faultInfo).toBeDefined();
+    expect(decoded.faultInfo?.faultMessage).toContain('LoadProhibited');
+    expect(decoded.faultInfo?.faultCode).toBe(28);
+  });
+
+  it('extracts epc1 as program counter', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    expect(decoded.faultInfo?.programCounter).toBe('0x4020e41c');
+  });
+
+  it('parses ESP8266 registers from epc1=... format', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    expect(decoded.regs).toBeDefined();
+    expect(decoded.regs?.['EPC1']).toBe(0x4020e41c);
+    expect(decoded.regs?.['EPC2']).toBe(0x00000000);
+    expect(decoded.regs?.['EXCVADDR']).toBe(0x00000000);
+  });
+
+  it('extracts code addresses from >>>stack>>> dump', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    expect(decoded.stacktrace.length).toBeGreaterThan(0);
+
+    // Known code addresses from the fixture stack dump
+    const addresses = decoded.stacktrace.map((f) => f.address.toLowerCase());
+    expect(addresses).toContain('0x40201df1');
+    expect(addresses).toContain('0x40201e29');
+    expect(addresses).toContain('0x40201e62');
+    expect(addresses).toContain('0x40202284');
+    expect(addresses).toContain('0x40202b38');
+    expect(addresses).toContain('0x40203e68');
+    expect(addresses).toContain('0x40100b39');
+  });
+
+  it('does not include non-code addresses in stacktrace', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    // Data addresses (0x3fxxxxxx) should not appear in stacktrace
+    for (const frame of decoded.stacktrace) {
+      const val = parseInt(frame.address, 16);
+      expect(val).toBeGreaterThanOrEqual(0x40000000);
+      expect(val).toBeLessThan(0x50000000);
+    }
+  });
+
+  it('includes excvaddr as fault address', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', '/nonexistent/gdb', 'xtensa');
+
+    expect(decoded.faultInfo?.faultAddr).toBe('0x00000000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ESP8266 fast-path: addr2line resolution with a stubbed binary
+// ---------------------------------------------------------------------------
+const isWindows = process.platform === 'win32';
+
+describe.skipIf(isWindows)('decodeCrash – ESP8266 addr2line fast-path', () => {
+  // Create a temp directory with a fake GDB and addr2line binary pair
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'esp-decoder-test-'));
+  const binDir = path.join(tmpDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const fakeGdbPath = path.join(binDir, 'xtensa-lx106-elf-gdb');
+  const fakeAddr2linePath = path.join(binDir, 'xtensa-lx106-elf-addr2line');
+
+  // The fake addr2line script outputs resolved function/file info for every address
+  const addr2lineScript = `#!/bin/sh
+for addr in "$@"; do
+  case "$addr" in
+    -* | /* ) continue ;;
+    0x*)
+      echo "$addr"
+      echo "app_main"
+      echo "/home/user/project/main.cpp:42"
+      ;;
+  esac
+done
+`;
+
+  fs.writeFileSync(fakeGdbPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(fakeAddr2linePath, addr2lineScript, { mode: 0o755 });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeEsp8266CrashEvent(): CrashEvent {
+    const lines = ESP8266_CRASH_TEXT.split('\n').filter((l) => l.trim().length > 0);
+    return {
+      id: 'test-esp8266-fast-001',
+      kind: 'xtensa',
+      lines,
+      rawText: ESP8266_CRASH_TEXT,
+      timestamp: Date.now(),
+    };
+  }
+
+  it('resolves frames via addr2line fast-path (toolsMissing is false)', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.toolsMissing).toBeFalsy();
+    expect(decoded.stacktrace.length).toBeGreaterThan(0);
+
+    // All frames should have resolved function and file info from the stub
+    for (const frame of decoded.stacktrace) {
+      expect(frame.function).toBe('app_main');
+      expect(frame.file).toContain('main.cpp');
+    }
+  });
+
+  it('resolves known address 0x40201df1 to a non-empty function/file', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    const frame = decoded.stacktrace.find((f) => f.address.toLowerCase() === '0x40201df1');
+    expect(frame).toBeDefined();
+    expect(frame!.function).toBeTruthy();
+    expect(frame!.file).toBeTruthy();
+  });
+
+  it('includes fault info from parseXtensaFaultInfo', async () => {
+    const event = makeEsp8266CrashEvent();
+    const decoded = await decodeCrash(event, '/nonexistent/firmware.elf', fakeGdbPath, 'xtensa');
+
+    expect(decoded.faultInfo).toBeDefined();
+    expect(decoded.faultInfo?.faultCode).toBe(28);
+    expect(decoded.faultInfo?.faultMessage).toContain('LoadProhibited');
   });
 });
 
