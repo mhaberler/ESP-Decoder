@@ -15,6 +15,8 @@ export class SerialPortManager extends vscode.Disposable {
   private _selectedPath: string | undefined;
   private _baudRate: number;
   private _isConnected = false;
+  private readonly log: vscode.OutputChannel;
+  private readonly ownsLog: boolean;
 
   private readonly _onData = new vscode.EventEmitter<Buffer>();
   readonly onData = this._onData.event;
@@ -29,8 +31,10 @@ export class SerialPortManager extends vscode.Disposable {
   private _suspendedPath: string | undefined;
   private _suspendedBaudRate: number | undefined;
 
-  constructor() {
+  constructor(outputChannel?: vscode.OutputChannel) {
     super(() => this.dispose());
+    this.ownsLog = !outputChannel;
+    this.log = outputChannel || vscode.window.createOutputChannel('ESP Decoder');
     const config = vscode.workspace.getConfiguration('esp-decoder');
     this._baudRate = config.get<number>('defaultBaudRate', 115200);
   }
@@ -56,7 +60,7 @@ export class SerialPortManager extends vscode.Disposable {
         serialNumber: p.serialNumber,
         vendorId: p.vendorId,
         productId: p.productId,
-        friendlyName: p.friendlyName,
+        friendlyName: (p as unknown as Record<string, unknown>).friendlyName as string | undefined,
       }));
     } catch (err) {
       vscode.window.showErrorMessage(
@@ -110,6 +114,7 @@ export class SerialPortManager extends vscode.Disposable {
   }
 
   async connect(): Promise<boolean> {
+    this.log.appendLine(`[ESP Decoder] connect() called, isConnected: ${this._isConnected}, path: ${this._selectedPath}`);
     if (this._isConnected) {
       await this.disconnect();
     }
@@ -117,21 +122,24 @@ export class SerialPortManager extends vscode.Disposable {
     if (!this._selectedPath) {
       const selected = await this.selectPort();
       if (!selected) {
+        this.log.appendLine('[ESP Decoder] No port selected, aborting connect');
         return false;
       }
     }
 
     return new Promise<boolean>((resolve) => {
+      this.log.appendLine(`[ESP Decoder] Creating SerialPort instance for ${this._selectedPath} @ ${this._baudRate}`);
       try {
         this.port = new SerialPort(
           {
             path: this._selectedPath!,
             baudRate: this._baudRate,
             autoOpen: false,
+            hupcl: false,
           },
         );
       } catch (err) {
-        console.error('[ESP Decoder] Failed to create SerialPort:', err);
+        this.log.appendLine(`[ESP Decoder] Failed to create SerialPort: ${err instanceof Error ? err.message : err}`);
         vscode.window.showErrorMessage(
           `Failed to create serial port: ${err instanceof Error ? err.message : err}`
         );
@@ -140,19 +148,19 @@ export class SerialPortManager extends vscode.Disposable {
         return;
       }
 
-      this.port.on('data', (data: Buffer) => {
-        this._onData.fire(data);
-      });
-
       this.port.on('error', (err: Error) => {
-        console.error('[ESP Decoder] Serial port error:', err);
         this._onError.fire(err);
-        vscode.window.showErrorMessage(`Serial port error: ${err.message}`);
       });
 
-      this.port.on('close', () => {
-        this._isConnected = false;
-        this._onConnectionChange.fire(false);
+      this.port.on('close', (disconnectError?: Error | null) => {
+        if (disconnectError) {
+          this._onError.fire(disconnectError);
+        }
+        this.port = null;
+        if (this._isConnected) {
+          this._isConnected = false;
+          this._onConnectionChange.fire(false);
+        }
       });
 
       this.port.open((err) => {
@@ -164,6 +172,11 @@ export class SerialPortManager extends vscode.Disposable {
           resolve(false);
           return;
         }
+        // Register the data listener only after the port is open so the
+        // stream's first _read() runs with a fully initialised handle.
+        this.port!.on('data', (data: Buffer) => {
+          this._onData.fire(data);
+        });
         this._isConnected = true;
         this._onConnectionChange.fire(true);
         resolve(true);
@@ -181,12 +194,10 @@ export class SerialPortManager extends vscode.Disposable {
       }
 
       this.port.close((err) => {
-        this.port = null;
-        this._isConnected = false;
-        this._onConnectionChange.fire(false);
         if (err) {
           reject(err);
         } else {
+          // The 'close' event handler will set _isConnected and fire the event
           resolve();
         }
       });
@@ -262,5 +273,8 @@ export class SerialPortManager extends vscode.Disposable {
     this._onData.dispose();
     this._onError.dispose();
     this._onConnectionChange.dispose();
+    if (this.ownsLog) {
+      this.log.dispose();
+    }
   }
 }
