@@ -113,6 +113,25 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })
     );
 
+    // Auto-reconnect on unexpected disconnects (e.g. native USB-CDC reset)
+    this.disposables.push(
+      this.serialManager.onDisconnect((info) => {
+        this.logDebug(`[ESP Decoder] onDisconnect: userInitiated=${info.userInitiated} suspended=${info.suspended}`);
+        if (info.userInitiated || info.suspended) {
+          return;
+        }
+        const cfg = vscode.workspace.getConfiguration('esp-decoder');
+        const enabled = cfg.get<boolean>('serialMonitor.autoReconnect', false);
+        if (!enabled) {
+          this.logDebug('[ESP Decoder] auto-reconnect disabled (esp-decoder.serialMonitor.autoReconnect=false) — not reconnecting');
+          return;
+        }
+        const timeoutMs = cfg.get<number>('serialMonitor.autoReconnectTimeoutMs', 15000);
+        this.log.appendLine(`[ESP Decoder] Unexpected disconnect — starting auto-reconnect (timeout ${timeoutMs}ms)`);
+        this.serialManager.startAutoReconnect(timeoutMs);
+      })
+    );
+
     // Listen to crash events from trbr's capturer
     this.disposables.push(
       this.crashCapturer.onCrashDetected(async (event) => {
@@ -957,6 +976,17 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       })),
       rawOutput: result.rawOutput,
     };
+  }
+
+  /**
+   * Append a diagnostic line to the output channel only when
+   * `esp-decoder.debugLogging` is enabled. Use for verbose internal-state
+   * messages that are noise during normal use but useful for troubleshooting.
+   */
+  private logDebug(message: string): void {
+    if (vscode.workspace.getConfiguration('esp-decoder').get<boolean>('debugLogging', false)) {
+      this.log.appendLine(message);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

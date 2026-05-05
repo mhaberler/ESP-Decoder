@@ -150,6 +150,17 @@
           "default": true,
           "description": "Automatically scroll to bottom on new serial data"
         },
+        "esp-decoder.serialMonitor.autoReconnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically reconnect to the serial port if it disappears (e.g. during reset on boards with native USB-CDC such as ESP32-S2/S3/C3). Reconnection only occurs when a port reappears with the same VID/PID/serialNumber as the originally connected device."
+        },
+        "esp-decoder.serialMonitor.autoReconnectTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 15000,
+          "description": "Maximum time (in milliseconds) to keep polling for the device to reappear before giving up auto-reconnect."
+        },
         "esp-decoder.logDirectory": {
           "type": "string",
           "default": "logs",
@@ -193,6 +204,11 @@
           "minimum": 1,
           "default": 3,
           "description": "Number of regex matches to show before collapsing repeated characters (dedupPattern)"
+        },
+        "esp-decoder.debugLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit verbose diagnostic messages (e.g. internal state of the serial-port manager, auto-reconnect classification) to the ESP Decoder output channel. Enable when troubleshooting; leave off for normal use."
         }
       }
     }
