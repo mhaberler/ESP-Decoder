@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { findEspIdfBuilds } from './espIdfIntegration';
-import { core as pioCore } from 'pioarduino-node-helpers';
+import { core as pioCore, project as pioProject } from 'pioarduino-node-helpers';
 import { CHIP_TARGET_MAP, RISCV_TARGETS } from './chipTargets';
 
 /**
@@ -569,6 +569,23 @@ function resolveBuildDir(workspaceFolder: string, sections: Sections): string {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Read the `monitor_speed` value for the given PlatformIO environment using
+ * the ProjectConfig API from pioarduino-node-helpers.
+ * Returns `undefined` when PIO Core is unavailable, the key is absent, or
+ * the env is not found in the project config.
+ */
+export async function getMonitorBaudRate(projectPath: string): Promise<number | undefined> {
+  try {
+    const config = new pioProject.ProjectConfig(projectPath);
+    await config.read();
+    return config.getEnvMonitorSpeed(config.defaultEnv());
+  } catch {
+    // PIO Core not available or project not configured — ignore
+  }
+  return undefined;
+}
 
 /**
  * Find PlatformIO build environments in the workspace.

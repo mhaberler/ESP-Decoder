@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SerialPortManager } from './serialPortManager';
 import { EspDecoderWebviewPanel, SessionConfig } from './webviewPanel';
-import { findPioEnvironments, selectElfFile } from './pioIntegration';
+import { findPioEnvironments, selectElfFile, getMonitorBaudRate } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
 
 /** Shape of the public API exported by the pioarduino IDE extension. */
@@ -95,8 +95,17 @@ export function activate(context: vscode.ExtensionContext) {
         if (opts?.port) {
           serialManager.setPort(opts.port);
         }
-        if (typeof opts?.baudRate === 'number') {
-          serialManager.setBaudRate(opts.baudRate);
+        // If the caller did not supply a baud rate, look it up from
+        // platformio.ini via pioarduino-node-helpers so the project's
+        // monitor_speed is always honoured without the user having to
+        // configure it a second time inside ESP Decoder.
+        let resolvedBaudRate: number | undefined = opts?.baudRate;
+        if (typeof resolvedBaudRate !== 'number') {
+          const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          resolvedBaudRate = folder ? await getMonitorBaudRate(folder) : undefined;
+        }
+        if (typeof resolvedBaudRate === 'number') {
+          serialManager.setBaudRate(resolvedBaudRate);
         }
 
         if (viewProvider) {
@@ -120,7 +129,7 @@ export function activate(context: vscode.ExtensionContext) {
             const portChanged =
               !!opts?.port && opts.port !== prevPort;
             const baudChanged =
-              typeof opts?.baudRate === 'number' && opts.baudRate !== prevBaud;
+              typeof resolvedBaudRate === 'number' && resolvedBaudRate !== prevBaud;
             if (serialManager.isConnected && (portChanged || baudChanged)) {
               await serialManager.disconnect();
             }
@@ -424,6 +433,109 @@ function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string
   }
 }
 
+/** PlatformIO task provider type used by pioarduino IDE. */
+const PIO_TASK_TYPE = 'PlatformIO';
+
+/**
+ * Marker added to task definitions of synthetic upload-only tasks created
+ * by ESP-Decoder when intercepting a pioarduino "Upload and Monitor" task.
+ * Used to recognise our own task in the task lifecycle hooks (so we don't
+ * recurse) and to know when to open the ESP-Decoder monitor afterwards.
+ */
+const INTERCEPTED_TASK_MARKER = '__espDecoderInterceptedUpload__';
+
+/**
+ * Tracks synthetic upload-only TaskExecutions created by ESP-Decoder when
+ * intercepting a pioarduino "Upload and Monitor" task.  An execution is
+ * present from the moment executeTask() resolves until after openMonitor /
+ * reacquireWithRetry completes, ensuring pioarduino's onDidUpload is
+ * suppressed for the entire handover window.
+ */
+const syntheticUploadExecutions = new Set<vscode.TaskExecution>();
+
+/**
+ * True during the brief gap between terminate() of the combined task and
+ * the synthetic task execution being added to syntheticUploadExecutions.
+ * Prevents pioarduino's spurious onDidUpload(exitCode != 0) from slipping
+ * through during that window.
+ */
+let suppressingCombinedTask = false;
+
+/**
+ * Detect whether a VSCode task is pioarduino's "Upload and Monitor" task.
+ *
+ * pioarduino exposes two surface markers:
+ *  - definition.type === 'PlatformIO'
+ *  - the task name (e.g. `Upload and Monitor`) and/or task args contain both
+ *    `--target upload` and `--target monitor`.
+ *
+ * The task name is localizable in newer pioarduino versions, so we look at
+ * both the name and (when available) the underlying ProcessExecution args.
+ */
+function isPioUploadAndMonitorTask(task: vscode.Task): boolean {
+  if (task.definition?.type !== PIO_TASK_TYPE) {
+    return false;
+  }
+  if (task.definition?.[INTERCEPTED_TASK_MARKER]) {
+    return false;
+  }
+  if (/upload\s*and\s*monitor/i.test(task.name)) {
+    return true;
+  }
+  const execution = task.execution;
+  if (execution instanceof vscode.ProcessExecution) {
+    const args = execution.args ?? [];
+    const hasUploadTarget = args.some((arg, i) => arg === '--target' && args[i + 1] === 'upload');
+    const hasMonitorTarget = args.some((arg, i) => arg === '--target' && args[i + 1] === 'monitor');
+    if (hasUploadTarget && hasMonitorTarget) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Build a synthetic "upload-only" Task by cloning the given pioarduino
+ * "Upload and Monitor" task and stripping the `--target monitor` arguments
+ * from its ProcessExecution.  Returns undefined if the task uses an
+ * unsupported execution type.
+ */
+function buildUploadOnlyTask(original: vscode.Task): vscode.Task | undefined {
+  const execution = original.execution;
+  if (!(execution instanceof vscode.ProcessExecution)) {
+    return undefined;
+  }
+
+  const newArgs: string[] = [];
+  const args = execution.args ?? [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--target' && args[i + 1] === 'monitor') {
+      i++; // also skip the literal "monitor"
+      continue;
+    }
+    newArgs.push(String(args[i]));
+  }
+
+  const definition = {
+    ...original.definition,
+    [INTERCEPTED_TASK_MARKER]: true,
+  };
+
+  const uploadOnly = new vscode.Task(
+    definition,
+    original.scope ?? vscode.TaskScope.Workspace,
+    original.name,
+    original.source,
+    new vscode.ProcessExecution(execution.process, newArgs, execution.options),
+    original.problemMatchers,
+  );
+  uploadOnly.presentationOptions = original.presentationOptions;
+  if (original.group) {
+    uploadOnly.group = original.group;
+  }
+  return uploadOnly;
+}
+
 /**
  * Subscribe to pioarduino IDE upload lifecycle events.
  *
@@ -439,12 +551,134 @@ function findEspIdfProjectRoot(elfPath: string, workspaceFolder: string): string
  *  - Retry-based reacquire: instead of a fixed delay we try to reconnect
  *    immediately and retry with short back-off if the OS hasn't released the
  *    device yet.
+ *
+ * Additionally, we intercept pioarduino's "Upload and Monitor" task as
+ * early as possible: pioarduino runs upload+monitor as a single
+ * `pio run --target upload --target monitor` invocation, so its built-in
+ * CLI monitor would normally start in the integrated terminal once the
+ * upload finishes — and `onDidUpload` only fires after the user closes
+ * that monitor again.  We therefore listen on `vscode.tasks.onDidStartTask`,
+ * cancel the combined task immediately, and re-launch a synthetic
+ * upload-only task in its place.  When that synthetic task ends with
+ * exitCode 0 we open `esp-decoder.openMonitor` with auto-connect — same
+ * handover semantics that pioarduino already implements for the standalone
+ * "Monitor" task.
  */
 function subscribeToPioarduinoEvents(
   context: vscode.ExtensionContext,
   serial: SerialPortManager,
   log: vscode.OutputChannel,
 ): void {
+  // Early intercept: replace "Upload and Monitor" with upload-only as soon
+  // as pioarduino starts the combined task, so the CLI monitor never opens.
+  context.subscriptions.push(
+    vscode.tasks.onDidStartTask(async (event) => {
+      const task = event.execution.task;
+      if (!isPioUploadAndMonitorTask(task)) {
+        return;
+      }
+
+      const uploadOnly = buildUploadOnlyTask(task);
+      if (!uploadOnly) {
+        log.appendLine(
+          `[ESP Decoder] Cannot intercept "${task.name}": unsupported task execution type`,
+        );
+        return;
+      }
+
+      log.appendLine(
+        `[ESP Decoder] Intercepting "${task.name}" — running upload only, then opening ESP Decoder monitor`,
+      );
+
+      // Register the end listener BEFORE calling terminate() to avoid a race
+      // where onDidEndTask fires before we start listening.
+      const origExecution = event.execution;
+      const originalTaskEnded = new Promise<void>((resolve) => {
+        const sub = vscode.tasks.onDidEndTask((endEvent) => {
+          if (endEvent.execution === origExecution) {
+            sub.dispose();
+            resolve();
+          }
+        });
+        // Safety: resolve after 10 s if onDidEndTask never fires (e.g. window reload).
+        setTimeout(() => {
+          sub.dispose();
+          resolve();
+        }, 10_000);
+      });
+
+      // Suppress the bogus onDidUpload(exitCode != 0) that pioarduino will
+      // fire when we terminate the combined task below.
+      suppressingCombinedTask = true;
+
+      try {
+        origExecution.terminate();
+      } catch (err) {
+        log.appendLine(`[ESP Decoder] Failed to terminate combined task: ${err}`);
+      }
+
+      // Wait for the original task to fully exit so two pio run processes
+      // never contend for the serial port simultaneously.
+      await originalTaskEnded;
+
+      try {
+        const execution = await vscode.tasks.executeTask(uploadOnly);
+        syntheticUploadExecutions.add(execution);
+        suppressingCombinedTask = false;
+      } catch (err) {
+        log.appendLine(`[ESP Decoder] Failed to launch upload-only replacement task: ${err}`);
+        suppressingCombinedTask = false;
+      }
+    }),
+  );
+
+  // When our synthetic upload-only task ends, open ESP Decoder (success)
+  // or fall back to reacquiring the port for monitoring (failure).
+  context.subscriptions.push(
+    vscode.tasks.onDidEndTaskProcess(async (event) => {
+      const task = event.execution.task;
+      if (!task.definition?.[INTERCEPTED_TASK_MARKER]) {
+        return;
+      }
+
+      log.appendLine(
+        `[ESP Decoder] Intercepted upload-only task ended (exitCode=${event.exitCode})`,
+      );
+
+      if (event.exitCode === 0) {
+        try {
+          await vscode.commands.executeCommand('esp-decoder.openMonitor', {
+            port: serial.selectedPath,
+            autoConnect: true,
+          });
+        } catch (err) {
+          log.appendLine(
+            `[ESP Decoder] Failed to open monitor after intercepted upload: ${err}`,
+          );
+        }
+      } else {
+        // Upload failed (or was cancelled): try to reacquire the port so any
+        // already-open monitor keeps working.
+        await reacquireWithRetry(serial, log);
+      }
+
+      // Clear suppression only after handover operations complete, so any
+      // pioarduino onDidUpload for the synthetic task is still suppressed.
+      syntheticUploadExecutions.delete(event.execution);
+    }),
+  );
+
+  // Fallback cleanup: remove synthetic executions that ended without
+  // onDidEndTaskProcess firing (e.g., task was cancelled before the process
+  // started).  Set.delete is a no-op for executions already removed above.
+  context.subscriptions.push(
+    vscode.tasks.onDidEndTask((event) => {
+      if (event.execution.task.definition?.[INTERCEPTED_TASK_MARKER]) {
+        syntheticUploadExecutions.delete(event.execution);
+      }
+    }),
+  );
+
   const pioExt = vscode.extensions.getExtension<PioarduinoApi>('pioarduino.pioarduino-ide');
   if (!pioExt) {
     log.appendLine('[ESP Decoder] pioarduino IDE extension not found — upload events unavailable');
@@ -488,6 +722,17 @@ function subscribeToPioarduinoEvents(
 
     context.subscriptions.push(
       api.onDidUpload(async ({ port, exitCode }) => {
+        // Suppress the spurious upload event that pioarduino fires when we
+        // terminate the combined "Upload and Monitor" task as part of the
+        // early-intercept flow above.  The synthetic upload-only task
+        // handles its own lifecycle via onDidEndTaskProcess.
+        if (suppressingCombinedTask || syntheticUploadExecutions.size > 0) {
+          log.appendLine(
+            `[ESP Decoder] Ignoring onDidUpload (exitCode=${exitCode}) — intercepted upload in progress`,
+          );
+          return;
+        }
+
         log.appendLine(
           `[ESP Decoder] onDidUpload (port=${port ?? 'auto'}, exitCode=${exitCode}) — reacquiring serial port`,
         );
