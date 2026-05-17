@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2] - 2026-05-17
+
+### Revert
+- **PR #54** - since it generates faulty empty line
+
+### Changed
+- **Terminal width** - adjusting spacing and ensuring content renders properly without unwanted horizontal overflow.
+
 ## [0.26.1] - 2026-05-17
 
 ### Fixed
