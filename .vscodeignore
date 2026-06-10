@@ -11,6 +11,8 @@ eslint.config.*
 tsconfig.json
 esbuild.js
 .gitignore
+untracked/**
+bun.lock
 node_modules/pioarduino-node-helpers/**
 node_modules/**/.*
 node_modules/**/tsconfig.json

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.28.0] - 2026-06-10
+
+### New Feature
+  - **MCP server** — opt-in localhost MCP server (`esp-decoder.mcp.enabled`, streamable HTTP at `http://127.0.0.1:37373/mcp`) so AI agents such as Claude Code can drive the monitor: connect/disconnect, cursor-based serial log tailing, send/hard-reset, crash listing & backtrace decoding, and firmware upload (`pio run -t upload` / `idf.py flash` as a VS Code task with automatic serial-port release/reacquire). New command **ESP Decoder: Copy MCP Server URL**. See [docs/MCP.md](docs/MCP.md); a ready-made Claude Code skill ships in `skills/esp-decoder-mcp/`.
+
 ## [0.27.0] - 2026-05-18
 
 ### New Feature
