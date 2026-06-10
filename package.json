@@ -2,7 +2,7 @@
   "name": "esp-decoder",
   "displayName": "ESP Crash Decoder",
   "description": "Decode ESP32 / ESP8266 crash dumps from serial port",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "publisher": "Jason2866",
   "license": "GPL-3.0",
   "icon": "assets/icon_large.png",
@@ -248,11 +248,11 @@
     "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "serialport": "^13.0.0",
-    "zod": "^3.25.0"
+    "serialport": "^13.0.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.59.4",
