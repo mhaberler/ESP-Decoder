@@ -73,6 +73,10 @@ Available tools: `list_ports`, `connect`, `disconnect`, `get_status`,
 `idf.py flash` as a VS Code task, releasing/reacquiring the serial port
 around the flash), and `list_environments`.
 
+See [docs/MCP.md](docs/MCP.md) for full documentation and
+[skills/esp-decoder-mcp/](skills/esp-decoder-mcp/SKILL.md) for a ready-made
+Claude Code agent skill.
+
 ## How It Works
 
 1. Serial data is received and displayed in the **Serial Monitor** tab
