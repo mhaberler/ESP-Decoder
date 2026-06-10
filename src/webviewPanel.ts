@@ -26,6 +26,9 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
   private readonly log: vscode.OutputChannel;
 
   private serialLines: string[] = [];
+  // Absolute line index of serialLines[0] since activation — keeps MCP read
+  // cursors stable across buffer trimming and clears.
+  private lineSeqBase = 0;
   private crashEvents: CrashEvent[] = [];
   private lineBuffer = '';
   private config: SessionConfig = {};
@@ -301,6 +304,36 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     return this.config.elfPath;
   }
 
+  /**
+   * Read buffered serial lines after an absolute cursor position.
+   * Cursors are absolute line indices since activation; they survive buffer
+   * trimming (lineSeqBase tracks how many lines were dropped from the front).
+   */
+  public getSerialLines(
+    afterCursor: number,
+    maxLines: number
+  ): { lines: string[]; nextCursor: number; dropped: boolean } {
+    const dropped = afterCursor < this.lineSeqBase;
+    const start = Math.min(
+      Math.max(afterCursor - this.lineSeqBase, 0),
+      this.serialLines.length
+    );
+    const lines = this.serialLines.slice(start, start + maxLines);
+    return {
+      lines,
+      nextCursor: this.lineSeqBase + start + lines.length,
+      dropped,
+    };
+  }
+
+  public getCrashEvents(): readonly CrashEvent[] {
+    return this.crashEvents;
+  }
+
+  public getSessionConfig(): SessionConfig {
+    return { ...this.config };
+  }
+
   private handleSerialData(data: Buffer): void {
     // Use StringDecoder to correctly handle multi-byte UTF-8 characters
     // (e.g. ▂▄▆█) that may be split across consecutive data chunks.
@@ -350,6 +383,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
     // a large array in-place, which is clearer and avoids the risk of GC
     // pressure from holding stale references in the old tail.
     if (this.serialLines.length > maxLines) {
+      this.lineSeqBase += this.serialLines.length - maxLines;
       this.serialLines = this.serialLines.slice(-maxLines);
     }
   }
@@ -477,6 +511,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         break;
       case 'clear':
         this.cancelSerialFlush();
+        this.lineSeqBase += this.serialLines.length;
         this.serialLines = [];
         this.crashEvents = [];
         this.crashCapturer.reset();

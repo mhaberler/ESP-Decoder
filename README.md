@@ -35,6 +35,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | `ESP Decoder: Disconnect Serial Port` | Disconnect the serial port |
 | `ESP Decoder: Select ELF File` | Choose ELF file for decoding |
 | `ESP Decoder: Clear Output` | Clear serial and crash data |
+| `ESP Decoder: Copy MCP Server URL` | Copy the MCP endpoint URL for AI agents |
 
 ## Settings
 
@@ -48,6 +49,29 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | `esp-decoder.serialMonitor.maxLines` | `5000` | Max lines in serial output |
 | `esp-decoder.serialMonitor.autoscroll` | `true` | Auto-scroll on new data |
 | `esp-decoder.logDirectory` | `logs` | Directory for Log2File output (relative to workspace by default) |
+| `esp-decoder.mcp.enabled` | `false` | Run a localhost MCP server so AI agents can drive the monitor |
+| `esp-decoder.mcp.port` | `37373` | TCP port for the MCP server |
+
+## MCP Server (AI Agent Integration)
+
+When `esp-decoder.mcp.enabled` is set, the extension hosts an MCP
+(Model Context Protocol) server at `http://127.0.0.1:<port>/mcp` (streamable
+HTTP, bound to localhost only). An AI agent such as Claude Code can then drive
+the monitor: connect/disconnect the serial port, tail the log, upload
+firmware, and decode detected crashes — while the webview keeps displaying the
+same stream.
+
+Register with Claude Code:
+
+```sh
+claude mcp add --transport http esp-decoder http://127.0.0.1:37373/mcp
+```
+
+Available tools: `list_ports`, `connect`, `disconnect`, `get_status`,
+`read_serial` (cursor-based log tailing), `send_serial`, `hard_reset`,
+`list_crashes`, `decode_crash`, `upload_firmware` (runs `pio run -t upload` or
+`idf.py flash` as a VS Code task, releasing/reacquiring the serial port
+around the flash), and `list_environments`.
 
 ## How It Works
 
