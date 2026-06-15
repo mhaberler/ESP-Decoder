@@ -232,6 +232,12 @@
           "maximum": 65535,
           "default": 37373,
           "description": "TCP port for the MCP server (streamable HTTP at http://127.0.0.1:<port>/mcp). Use a per-workspace override when running multiple VS Code windows."
+        },
+        "esp-decoder.improv.timeout": {
+          "type": "integer",
+          "minimum": 1000,
+          "default": 30000,
+          "description": "Timeout (ms) for each Improv-WiFi serial command (device info, network scan, provisioning). Applies to the WiFi provisioning button and the provision_wifi MCP tool."
         }
       }
     }

@@ -7,6 +7,7 @@ import { SerialPortManager } from './serialPortManager';
 import { decodeCrash, CrashEvent } from './crashDecoder';
 import { findPioEnvironments } from './pioIntegration';
 import { findEspIdfBuilds } from './espIdfIntegration';
+import { withImprovSession } from './improvWiFi';
 import type { SessionConfig } from './webviewPanel';
 import type { UploadResult } from './mcpUpload';
 
@@ -196,6 +197,28 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
     async () => {
       await serial.hardReset();
       return jsonResult({ reset: true });
+    }
+  );
+
+  server.registerTool(
+    'provision_wifi',
+    {
+      description:
+        'Provision WiFi credentials to the connected board over the Improv serial protocol. Requires firmware that implements Improv serial. Pauses the serial monitor for the duration.',
+      inputSchema: {
+        ssid: z.string().describe('WiFi network name'),
+        password: z.string().default('').describe('WiFi password (empty for open networks)'),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ ssid, password }) => {
+      const timeoutMs = vscode.workspace
+        .getConfiguration('esp-decoder')
+        .get<number>('improv.timeout', 30000);
+      const { nextUrl } = await withImprovSession(serial, timeoutMs, (engine) =>
+        engine.provision(ssid, password)
+      );
+      return jsonResult({ provisioned: true, nextUrl });
     }
   );
 

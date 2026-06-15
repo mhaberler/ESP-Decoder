@@ -14,6 +14,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 - **Click-to-Navigate** — Click on decoded file:line references to open source files
 - **Register Display** — Shows CPU register values at the time of crash
 - **Multi-Arch Support** — Xtensa (ESP32/S2/S3) and RISC-V (ESP32-C3/C6/H2)
+- **WiFi Provisioning** — Hand WiFi credentials to the connected board over the [Improv serial protocol](https://www.improv-wifi.com/serial/) (no browser required)
 
 ## Quick Start
 
@@ -23,6 +24,26 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 4. Select serial port and connect
 5. The ELF file is auto-detected from `.pio/build/` or `build/`
 6. Crash dumps are automatically detected and decoded
+
+## WiFi Provisioning (Improv)
+
+If the running firmware implements the
+[Improv serial protocol](https://www.improv-wifi.com/serial/) (e.g. the ESP-IDF
+`improv` component or the Arduino `improv-wifi` library), you can provision WiFi
+credentials directly from the monitor — no Chrome/WebSerial and no fighting over
+the port:
+
+1. Connect to the board in the serial monitor.
+2. Click the **WiFi** button in the toolbar.
+3. The extension queries device info and scans nearby networks; pick one (or type
+   an SSID), enter the password, and click **Provision**.
+4. On success the device's `next-url` (e.g. its setup page) is shown.
+
+The serial monitor pauses while provisioning (the raw byte stream is routed to
+the Improv parser) and resumes when the dialog closes. The per-command timeout is
+configurable via `esp-decoder.improv.timeout`. AI agents can do the same headless
+via the `provision_wifi` MCP tool. Provisioning is a no-op (times out with a clear
+message) if the firmware does not speak Improv.
 
 ## Commands
 
@@ -51,6 +72,7 @@ Designed to work with [**pioarduino**](https://marketplace.visualstudio.com/item
 | `esp-decoder.logDirectory` | `logs` | Directory for Log2File output (relative to workspace by default) |
 | `esp-decoder.mcp.enabled` | `false` | Run a localhost MCP server so AI agents can drive the monitor |
 | `esp-decoder.mcp.port` | `37373` | TCP port for the MCP server |
+| `esp-decoder.improv.timeout` | `30000` | Per-command timeout (ms) for Improv-WiFi provisioning |
 
 ## MCP Server (AI Agent Integration)
 
@@ -69,7 +91,8 @@ claude mcp add --transport http esp-decoder http://127.0.0.1:37373/mcp
 
 Available tools: `list_ports`, `connect`, `disconnect`, `get_status`,
 `read_serial` (cursor-based log tailing), `send_serial`, `hard_reset`,
-`list_crashes`, `decode_crash`, `upload_firmware` (runs `pio run -t upload` or
+`provision_wifi` (Improv-WiFi serial provisioning), `list_crashes`,
+`decode_crash`, `upload_firmware` (runs `pio run -t upload` or
 `idf.py flash` as a VS Code task, releasing/reacquiring the serial port
 around the flash), and `list_environments`.
 

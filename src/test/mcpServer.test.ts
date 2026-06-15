@@ -285,6 +285,7 @@ describe('MCP tools', () => {
       'list_crashes',
       'list_environments',
       'list_ports',
+      'provision_wifi',
       'read_serial',
       'send_serial',
       'upload_firmware',
