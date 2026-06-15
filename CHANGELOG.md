@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.1] - 2026-06-15
+
+### Fixed
+  - **Improv provisioning — responses without a trailing newline.** The packet parser required the optional trailing `\n` that the spec lists but firmwares may omit (e.g. the Arduino `ImprovWiFi` library ends its responses at the checksum). Device-info/scan/provision responses were therefore one byte short and timed out. Frames now end at the checksum byte; a trailing newline is tolerated as inter-frame noise.
+
+### Changed
+  - **WiFi provisioning — best-effort scan.** The network scan in the WiFi dialog now uses a short timeout and degrades to manual SSID entry when the firmware doesn't support (or is slow to answer) the scan RPC, instead of failing the whole flow. Device info is fetched first, so provisioning proceeds even when scanning is unavailable.
+
 ## [0.29.0] - 2026-06-15
 
 ### New Feature

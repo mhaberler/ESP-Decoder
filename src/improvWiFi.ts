@@ -191,7 +191,11 @@ export class ImprovEngine {
         return;
       }
       const len = this.buf[8];
-      const total = IMPROV_HEADER.length + 3 + len + 2; // +checksum +newline
+      // A frame ends at the checksum byte. The trailing newline that senders
+      // (incl. our own encoder) append is optional per the Improv spec — some
+      // firmwares (e.g. the Arduino ImprovWiFi library) omit it. So do NOT
+      // require it here; it is harmlessly skipped as inter-frame noise.
+      const total = IMPROV_HEADER.length + 3 + len + 1; // +checksum
       if (this.buf.length < total) {
         return; // wait for more bytes
       }
@@ -220,9 +224,10 @@ export class ImprovEngine {
     if (version !== IMPROV_VERSION) {
       return; // not a packet we understand; ignore
     }
-    const checksumByte = frame[frame.length - 2];
+    // Checksum is the final byte; sum covers everything before it.
+    const checksumByte = frame[frame.length - 1];
     let sum = 0;
-    for (let i = 0; i < frame.length - 2; i++) {
+    for (let i = 0; i < frame.length - 1; i++) {
       sum += frame[i];
     }
     if ((sum & 0xff) !== checksumByte) {

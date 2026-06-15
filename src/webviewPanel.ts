@@ -342,7 +342,14 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       .get<number>('improv.timeout', 30000);
   }
 
-  /** Run device-info + WiFi scan and send results to the webview modal. */
+  /**
+   * Run device-info + WiFi scan and send results to the webview modal.
+   *
+   * The network scan is best-effort: many Improv-serial firmwares (e.g. the
+   * Arduino ImprovWiFi library) do not implement the scan RPC and simply never
+   * answer it. Rather than fail provisioning, a scan timeout/error degrades to
+   * manual SSID entry. A short scan timeout keeps that fallback quick.
+   */
   private async handleImprovStart(): Promise<void> {
     if (!this.serialManager.isConnected) {
       this.postMessage({ type: 'improvError', message: 'Connect to a serial port first.' });
@@ -353,10 +360,23 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       const result = await withImprovSession(this.serialManager, this.improvTimeoutMs, async (engine) => {
         const info = await engine.requestInfo();
         this.postMessage({ type: 'improvProgress', message: 'Scanning networks…' });
-        const networks = await engine.scan();
-        return { info, networks };
+        const scanTimeoutMs = Math.min(5000, this.improvTimeoutMs);
+        try {
+          const networks = await engine.scan(scanTimeoutMs);
+          return { info, networks, scanSupported: true };
+        } catch {
+          // Firmware likely doesn't implement the scan RPC — fall back to
+          // manual entry. requestInfo already succeeded, so the device speaks
+          // Improv; only scanning is unsupported.
+          return { info, networks: [], scanSupported: false };
+        }
       });
-      this.postMessage({ type: 'improvScan', info: result.info, networks: result.networks });
+      this.postMessage({
+        type: 'improvScan',
+        info: result.info,
+        networks: result.networks,
+        scanSupported: result.scanSupported,
+      });
     } catch (err) {
       this.postMessage({
         type: 'improvError',
@@ -2465,12 +2485,15 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       vscode.postMessage({ type: 'improvStart' });
     }
 
-    function improvOnScan(info, networks) {
+    function improvOnScan(info, networks, scanSupported) {
       improvSetBusy(false);
       if (info) {
         improvInfo.textContent = (info.name || '') + ' — ' + (info.chipFamily || '') +
           ' — fw ' + (info.firmware || '') + ' ' + (info.version || '');
       }
+      const hasNetworks = networks && networks.length;
+      // Hide the (empty) network list when the firmware doesn't support scanning.
+      improvNetworks.style.display = hasNetworks ? '' : 'none';
       improvNetworks.innerHTML = '';
       (networks || []).forEach((n) => {
         const row = document.createElement('div');
@@ -2490,7 +2513,13 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
         });
         improvNetworks.appendChild(row);
       });
-      improvSetStatus(networks && networks.length ? '' : 'No networks found (you can type an SSID manually).', false);
+      if (hasNetworks) {
+        improvSetStatus('', false);
+      } else if (scanSupported) {
+        improvSetStatus('No networks found — type an SSID manually.', false);
+      } else {
+        improvSetStatus('This firmware does not support scanning — type the SSID and password manually.', false);
+      }
     }
 
     function improvOnResult(nextUrl) {
@@ -2661,7 +2690,7 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           improvSetStatus(msg.message, false);
           break;
         case 'improvScan':
-          improvOnScan(msg.info, msg.networks);
+          improvOnScan(msg.info, msg.networks, msg.scanSupported);
           break;
         case 'improvResult':
           improvOnResult(msg.nextUrl);

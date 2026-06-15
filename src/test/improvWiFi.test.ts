@@ -36,6 +36,16 @@ function frame(type: ImprovType, payload: number[]): Buffer {
   return Buffer.from([...body, checksum(body), 0x0a]);
 }
 
+/**
+ * Frame WITHOUT a trailing newline — exactly what the Arduino ImprovWiFi
+ * library emits (sendResponse() ends at the checksum). The newline is optional
+ * per spec and the parser must not require it.
+ */
+function frameNoNewline(type: ImprovType, payload: number[]): Buffer {
+  const body = [...IMPROV_HEADER, IMPROV_VERSION, type, payload.length, ...payload];
+  return Buffer.from([...body, checksum(body)]);
+}
+
 /** Encode a list of strings as length-prefixed blob (for RPC results). */
 function strings(...items: string[]): number[] {
   const blob: number[] = [];
@@ -170,6 +180,20 @@ describe('frame parser', () => {
 
     const info = await engine.requestInfo();
     expect(info.firmware).toBe('fw');
+  });
+
+  it('decodes a frame with no trailing newline (Arduino ImprovWiFi lib)', async () => {
+    const engine = new ImprovEngine(async () => {
+      engine.feed(
+        frameNoNewline(
+          ImprovType.RPCResult,
+          rpcResult(ImprovRPCCommand.RequestDeviceInformation, 'fw', 'v', 'chip', 'name'),
+        ),
+      );
+    }, 1000);
+
+    const info = await engine.requestInfo();
+    expect(info).toEqual({ firmware: 'fw', version: 'v', chipFamily: 'chip', name: 'name' });
   });
 
   it('ignores a frame with a bad checksum', async () => {
