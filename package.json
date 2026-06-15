@@ -252,7 +252,7 @@
     "version:patch": "npm version patch -m \"chore(release): %s\"",
     "version:minor": "npm version minor -m \"chore(release): %s\"",
     "version:major": "npm version major -m \"chore(release): %s\"",
-    "postversion": "git push --follow-tags"
+    "postversion": "git push gh-mah --follow-tags"
   },
   "overrides": {
     "@serialport/bindings-cpp": "npm:@jason2866/serialport-bindings-cpp@^13.0.5"
