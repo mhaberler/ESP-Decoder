@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.29.0] - 2026-06-15
+
+### New Feature
+  - **WiFi provisioning (Improv)** — hand WiFi credentials to the connected board over the [Improv serial protocol](https://www.improv-wifi.com/serial/), no browser/WebSerial required. New **WiFi** toolbar button (enabled while connected) opens a dialog that queries device info, scans nearby networks, and provisions the selected SSID/password, then shows the device's `next-url`. The serial monitor pauses for the duration (raw RX is routed to the Improv parser) and resumes when the dialog closes. Works only with firmware that implements Improv serial (e.g. the ESP-IDF `improv` component or the Arduino `improv-wifi` library); otherwise it times out with a clear message. New `esp-decoder.improv.timeout` setting and a `provision_wifi` MCP tool for headless agent flows.
+
 ## [0.28.0] - 2026-06-10
 
 ### New Feature
