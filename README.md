@@ -149,6 +149,20 @@ code --install-extension esp-decoder-0.1.0.vsix
 
 Or install from the Extensions sidebar: "Install from VSIX..."
 
+## Releasing
+
+1. Update `CHANGELOG.md` with the new version's entry.
+2. On a clean `main`, run one of:
+
+   ```bash
+   npm run version:patch   # or version:minor / version:major
+   ```
+
+   This bumps `package.json`, commits `chore(release): X.Y.Z`, creates the
+   `vX.Y.Z` tag, and pushes the commit and tag. The Build workflow then creates a
+   GitHub Release (with auto-generated notes and the `.vsix` attached) and
+   publishes to the VS Code Marketplace.
+
 ## Requirements
 
 - VS Code 1.85+
