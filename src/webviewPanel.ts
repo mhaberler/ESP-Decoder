@@ -348,7 +348,10 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
    * The network scan is best-effort: many Improv-serial firmwares (e.g. the
    * Arduino ImprovWiFi library) do not implement the scan RPC and simply never
    * answer it. Rather than fail provisioning, a scan timeout/error degrades to
-   * manual SSID entry. A short scan timeout keeps that fallback quick.
+   * manual SSID entry. The timeout is generous because a WiFi scan under
+   * AP+STA coexistence (common while Improv-provisioning) can legitimately
+   * take a minute or more on some chips/radios, even when the scan itself is
+   * non-blocking on the device side.
    */
   private async handleImprovStart(): Promise<void> {
     if (!this.serialManager.isConnected) {
@@ -356,11 +359,16 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
       return;
     }
     this.postMessage({ type: 'improvProgress', message: 'Querying device…' });
+    const scanTimeoutMs = Math.max(120000, this.improvTimeoutMs);
     try {
-      const result = await withImprovSession(this.serialManager, this.improvTimeoutMs, async (engine) => {
+      const result = await withImprovSession(this.serialManager, scanTimeoutMs, async (engine) => {
         const info = await engine.requestInfo();
+        const scanStart = Date.now();
+        const progressTimer = setInterval(() => {
+          const elapsed = Math.round((Date.now() - scanStart) / 1000);
+          this.postMessage({ type: 'improvProgress', message: `Scanning networks… (${elapsed}s)` });
+        }, 3000);
         this.postMessage({ type: 'improvProgress', message: 'Scanning networks…' });
-        const scanTimeoutMs = Math.min(5000, this.improvTimeoutMs);
         try {
           const networks = await engine.scan(scanTimeoutMs);
           return { info, networks, scanSupported: true };
@@ -369,6 +377,8 @@ export class EspDecoderWebviewPanel implements vscode.WebviewViewProvider {
           // manual entry. requestInfo already succeeded, so the device speaks
           // Improv; only scanning is unsupported.
           return { info, networks: [], scanSupported: false };
+        } finally {
+          clearInterval(progressTimer);
         }
       });
       this.postMessage({
