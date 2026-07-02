@@ -11,7 +11,7 @@
     "url": "https://github.com/Jason2866/ESP-Decoder.git"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.125.0"
   },
   "categories": [
     "Debuggers",
@@ -262,15 +262,15 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.25.0",
-    "@types/node": "^24.0.0",
-    "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.59.4",
-    "@typescript-eslint/parser": "^8.59.4",
-    "esbuild": "^0.28.0",
-    "eslint": "^10.4.0",
+    "zod": "^4.4.3",
+    "@types/node": "^26.1.0",
+    "@types/vscode": "^1.125.0",
+    "@typescript-eslint/eslint-plugin": "^8.62.1",
+    "@typescript-eslint/parser": "^8.62.1",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.6.0",
     "pioarduino-node-helpers": "^12.6.1",
     "typescript": "6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.9"
   }
 }
